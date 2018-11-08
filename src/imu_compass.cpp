@@ -130,26 +130,28 @@ void IMUCompass::declCallback(const std_msgs::Float32& data) {
   ROS_INFO("Using magnetic declination %f (%f degrees)", mag_declination_, mag_declination_ * 180 / M_PI);
 }
 
-void IMUCompass::magCallback(const geometry_msgs::Vector3StampedConstPtr& data) {
-  geometry_msgs::Vector3 imu_mag = data->vector;
+void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
+{
+  geometry_msgs::Vector3 imu_mag = data->magnetic_field;
   geometry_msgs::Vector3 imu_mag_transformed;
 
-  // Check for nans and bail
-  if ( std::isnan(data->vector.x) ||
-       std::isnan(data->vector.y) ||
-       std::isnan(data->vector.z) ) {
+  if (   std::isnan(data->magnetic_field.x)
+      || std::isnan(data->magnetic_field.y)
+      || std::isnan(data->magnetic_field.z))
+  {
     return;
   }
 
-  imu_mag.x = data->vector.x;
-  imu_mag.y = data->vector.y;
-  imu_mag.z = data->vector.z;
-
   last_measurement_update_time_ = ros::Time::now().toSec();
+
   tf::StampedTransform transform;
-  try {
+
+  try
+  {
     listener_.lookupTransform("base_link", data->header.frame_id, ros::Time(0), transform);
-  } catch (tf::TransformException &ex) {
+  }
+  catch (const tf::TransformException& ex)
+  {
     ROS_WARN("Missed transform between base_link and %s", data->header.frame_id.c_str());
     return;
   }
