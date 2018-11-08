@@ -28,22 +28,22 @@ double magn(tf::Vector3 a) {
       return sqrt(a.x()*a.x() + a.y()*a.y() + a.z()*a.z());
 }
 
-IMUCompass::IMUCompass(ros::NodeHandle &n) :
-    node_(n), curr_imu_reading_(new sensor_msgs::Imu()) {
+IMUCompass::IMUCompass(ros::NodeHandle &n, ros::NodeHandle &pn) :
+    node_(n), private_node_(pn), curr_imu_reading_(new sensor_msgs::Imu())
+  {
   // Acquire Parameters
-  ros::param::param("~mag_bias/x", mag_zero_x_, 0.0);
-  ros::param::param("~mag_bias/y", mag_zero_y_, 0.0);
-  ros::param::param("~mag_bias/z", mag_zero_z_, 0.0);
-
-
+  private_node_.param("mag_bias/x", mag_zero_x_, 0.0);
+  private_node_.param("mag_bias/y", mag_zero_y_, 0.0);
+  private_node_.param("mag_bias/z", mag_zero_z_, 0.0);
   ROS_INFO("Using magnetometer bias (x,y):%f,%f", mag_zero_x_, mag_zero_y_);
 
-  ros::param::param("~compass/sensor_timeout", sensor_timeout_, 0.5);
-  ros::param::param("~compass/yaw_meas_variance", yaw_meas_variance_, 10.0);
-  ros::param::param("~compass/gyro_meas_variance", heading_prediction_variance_, 0.01);
+  private_node_.param<std::string>("base_frame", base_frame_, "base_link");
+  private_node_.param("compass/sensor_timeout", sensor_timeout_, 0.5);
+  private_node_.param("compass/yaw_meas_variance", yaw_meas_variance_, 10.0);
+  private_node_.param("compass/gyro_meas_variance", heading_prediction_variance_, 0.01);
   ROS_INFO("Using variance %f", yaw_meas_variance_);
 
-  ros::param::param("~compass/mag_declination", mag_declination_, 0.0);
+  private_node_.param("compass/mag_declination", mag_declination_, 0.0);
   ROS_INFO("Using magnetic declination %f (%f degrees)", mag_declination_, mag_declination_ * 180 / M_PI);
 
   // Setup Subscribers
@@ -99,9 +99,9 @@ void IMUCompass::imuCallback(const sensor_msgs::ImuPtr data) {
   tf::StampedTransform transform;
 
   try {
-    listener_.lookupTransform("base_link", data->header.frame_id, ros::Time(0), transform);
+    listener_.lookupTransform(base_frame_, data->header.frame_id, ros::Time(0), transform);
   } catch (tf::TransformException &ex) {
-    ROS_WARN("Missed transform between base_link and %s", data->header.frame_id.c_str());
+    ROS_WARN("Missed transform between %s and %s", base_frame_.c_str(), data->header.frame_id.c_str());
     return;
   }
 
@@ -116,10 +116,10 @@ void IMUCompass::imuCallback(const sensor_msgs::ImuPtr data) {
     heading_prediction_ = curr_heading_ + yaw_gyro_reading * dt;  // xp = A*x + B*u
     heading_variance_prediction_ = curr_heading_variance_ + heading_prediction_variance_; // Sp = A*S*A' + R
 
-    if (heading_prediction_ > 3.14159)
-      heading_prediction_ -= 2 * 3.14159;
-    else if(heading_prediction_ < -3.14159)
-      heading_prediction_ += 2 * 3.14159;
+    if (heading_prediction_ > M_PI)
+      heading_prediction_ -= 2 * M_PI;
+    else if(heading_prediction_ < -M_PI)
+      heading_prediction_ += 2 * M_PI;
     gyro_update_complete_ = true;
   }
   curr_imu_reading_ = data;
@@ -139,6 +139,7 @@ void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
       || std::isnan(data->magnetic_field.y)
       || std::isnan(data->magnetic_field.z))
   {
+    ROS_WARN_THROTTLE(1, "Magnetic field data is NaN.");
     return;
   }
 
@@ -148,11 +149,11 @@ void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
 
   try
   {
-    listener_.lookupTransform("base_link", data->header.frame_id, ros::Time(0), transform);
+    listener_.lookupTransform(base_frame_, data->header.frame_id, ros::Time(0), transform);
   }
   catch (const tf::TransformException& ex)
   {
-    ROS_WARN("Missed transform between base_link and %s", data->header.frame_id.c_str());
+    ROS_WARN("Missed transform between %s and %s", base_frame_.c_str(), data->header.frame_id.c_str());
     return;
   }
 
@@ -241,7 +242,7 @@ void IMUCompass::repackageImuPublish(tf::StampedTransform transform) {
   tf::quaternionMsgToTF(curr_imu_reading_->orientation, imu_reading);
   double compass_heading = curr_heading_ - mag_declination_;
 
-  // Transform curr_imu_reading to base_link
+  // Transform curr_imu_reading to base_frame
   tf::Transform o_imu_reading;
   o_imu_reading = tf::Transform(imu_reading, tf::Vector3(0, 0, 0));
   o_imu_reading = o_imu_reading * transform;
@@ -276,8 +277,8 @@ void IMUCompass::initFilter(double heading_meas) {
 
 int main(int argc, char **argv) {
   ros::init(argc, argv, "imu_compass");
-  ros::NodeHandle node;
-  IMUCompass imu_heading_estimator(node);
+  ros::NodeHandle node, private_node("~");
+  IMUCompass imu_heading_estimator(node, private_node);
   ros::spin();
   return 0;
 }
