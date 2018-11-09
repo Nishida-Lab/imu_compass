@@ -106,11 +106,19 @@ void IMUCompass::debugCallback(const ros::TimerEvent&)
 
 void IMUCompass::imuCallback(const sensor_msgs::Imu::Ptr& data)
 {
-  // Transform Data and get the yaw direction
-  geometry_msgs::Vector3 gyro_vector {data->angular_velocity};
-  geometry_msgs::Vector3 gyro_vector_transformed;
+  std::cerr << "imu callback" << std::endl;
 
-  if(!first_gyro_reading_)
+  std::cerr << "  angular_velocity" << std::endl;
+  std::cerr << "    x = " << data->angular_velocity.x << std::endl;
+  std::cerr << "    y = " << data->angular_velocity.y << std::endl;
+  std::cerr << "    z = " << data->angular_velocity.z << std::endl;
+  std::cerr << "  orientation" << std::endl;
+  std::cerr << "    x = " << data->orientation.x << std::endl;
+  std::cerr << "    y = " << data->orientation.y << std::endl;
+  std::cerr << "    z = " << data->orientation.z << std::endl;
+  std::cerr << "    w = " << data->orientation.w << std::endl;
+
+  if (!first_gyro_reading_)
   {
     first_gyro_reading_ = true;
   }
@@ -131,10 +139,10 @@ void IMUCompass::imuCallback(const sensor_msgs::Imu::Ptr& data)
   }
 
   tf::Vector3 orig_bt {};
-  tf::vector3MsgToTF(gyro_vector, orig_bt);
+  tf::vector3MsgToTF(data->angular_velocity, orig_bt);
 
-  tf::Matrix3x3 transform_mat {transform.getRotation()};
-  tf::vector3TFToMsg(orig_bt * transform_mat, gyro_vector_transformed);
+  geometry_msgs::Vector3 gyro_vector_transformed {};
+  tf::vector3TFToMsg(orig_bt * tf::Matrix3x3 {transform.getRotation()}, gyro_vector_transformed);
 
   double yaw_gyro_reading {gyro_vector_transformed.z};
 
@@ -157,15 +165,6 @@ void IMUCompass::imuCallback(const sensor_msgs::Imu::Ptr& data)
   }
 
   curr_imu_reading_ = data;
-}
-
-void IMUCompass::declCallback(const std_msgs::Float32& data)
-{
-  std::cerr << "declination callback" << std::endl;
-
-  std::cerr << "  received std_msgs::Float32" << std::endl;
-  std::cerr << "    data = " << data.data << std::endl;
-  mag_declination_ = data.data;
 }
 
 void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
@@ -204,7 +203,10 @@ void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
   tf::vector3MsgToTF(data->magnetic_field, orig_bt);
 
   geometry_msgs::Vector3 imu_mag_transformed {};
-  tf::vector3TFToMsg(orig_bt * tf::Matrix3x3 {transform.getRotation()}, imu_mag_transformed);
+  tf::vector3TFToMsg(
+    orig_bt * tf::Matrix3x3 {transform.getRotation()},
+    imu_mag_transformed
+  );
 
   // Normalize vector
   tf::Vector3 calib_mag {
@@ -231,25 +233,50 @@ void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
 
   mag_pub_.publish(calibrated_mag);
 
-  tf::Quaternion q {};
-  tf::quaternionMsgToTF(curr_imu_reading_->orientation, q);
+  // tf::Quaternion q {};
+  // tf::quaternionMsgToTF(curr_imu_reading_->orientation, q);
+  // std::cerr << "  current reading imu" << std::endl;
+  // std::cerr << "    x = " << curr_imu_reading_->orientation.x << std::endl;
+  // std::cerr << "    y = " << curr_imu_reading_->orientation.y << std::endl;
+  // std::cerr << "    z = " << curr_imu_reading_->orientation.z << std::endl;
+  // std::cerr << "    w = " << curr_imu_reading_->orientation.w << std::endl;
 
-  tf::Transform curr_imu_meas;
-  curr_imu_meas = tf::Transform(q, tf::Vector3 {0, 0, 0}) * transform;
+  // tf::Transform curr_imu_meas {tf::Transform(q, tf::Vector3 {0, 0, 0}) * transform};
+  //
+  // double roll, pitch, yaw;
+  // tf::Matrix3x3 {curr_imu_meas.getRotation()}.getRPY(roll, pitch, yaw);
+  // std::cerr << "  roll = " << roll << std::endl;
+  // std::cerr << "  pitch = " << pitch << std::endl;
+  // std::cerr << "  yaw = " << yaw << std::endl;
 
-  double roll, pitch, yaw;
-  tf::Matrix3x3 {curr_imu_meas.getRotation()}.getRPY(roll, pitch, yaw);
+  const auto roll {std::atan2(
+    curr_imu_reading_->linear_acceleration.y,
+    curr_imu_reading_->linear_acceleration.z
+  )};
+  std::cerr << "  roll = " << roll << std::endl;
+
+  const auto pitch {std::atan2(
+      curr_imu_reading_->linear_acceleration.x * -1.0,
+      curr_imu_reading_->linear_acceleration.y * std::sin(roll)
+    + curr_imu_reading_->linear_acceleration.z * std::cos(roll)
+  )};
+  std::cerr << "  pitch = " << pitch << std::endl;
 
   const auto head_x {
-      calib_mag.x() * std::cos(pitch)
-    + calib_mag.z() * std::sin(pitch)
+    //   calib_mag.x() * std::cos(pitch)
+    // + calib_mag.z() * std::sin(pitch)
+      calib_mag.z() * std::sin(roll)
+    - calib_mag.y() * std::cos(roll)
   };
   std::cerr << "  head_x = " << head_x << std::endl;
 
   const auto head_y {
-      calib_mag.x() * std::sin(roll) * std::sin(pitch)
-    + calib_mag.y() * std::cos(roll)
-    - calib_mag.z() * std::sin(roll) * std::cos(pitch)
+    //   calib_mag.x() * std::sin(roll) * std::sin(pitch)
+    // + calib_mag.y() * std::cos(roll)
+    // - calib_mag.z() * std::sin(roll) * std::cos(pitch)
+      calib_mag.x() * std::cos(pitch)
+    + calib_mag.y() * std::sin(pitch) * std::sin(roll)
+    + calib_mag.z() * std::sin(pitch) * std::cos(roll)
   };
   std::cerr << "  head_y = " << head_y << std::endl;
 
@@ -292,6 +319,15 @@ void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
 
     gyro_update_complete_ = false;
   }
+}
+
+void IMUCompass::declCallback(const std_msgs::Float32& data)
+{
+  std::cerr << "declination callback" << std::endl;
+
+  std::cerr << "  received std_msgs::Float32" << std::endl;
+  std::cerr << "    data = " << data.data << std::endl;
+  mag_declination_ = data.data;
 }
 
 void IMUCompass::repackageImuPublish(tf::StampedTransform transform)
