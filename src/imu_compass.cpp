@@ -24,60 +24,79 @@ CPP file for IMU Compass Class that combines gyroscope and magnetometer data to 
 
 #include "imu_compass/imu_compass.h"
 
-double magn(tf::Vector3 a) {
-      return sqrt(a.x()*a.x() + a.y()*a.y() + a.z()*a.z());
+auto magn(const tf::Vector3& a)
+{
+  return std::sqrt(a.x() * a.x() + a.y() * a.y() + a.z() * a.z());
 }
 
-IMUCompass::IMUCompass(ros::NodeHandle &n, ros::NodeHandle &pn) :
-    node_(n), private_node_(pn), curr_imu_reading_(new sensor_msgs::Imu())
-  {
+IMUCompass::IMUCompass(ros::NodeHandle& n, ros::NodeHandle& pn)
+  : node_ {n},
+    private_node_ {pn},
+
+    // subscribers
+    imu_sub_ {node_.subscribe("imu/data", 1000, &IMUCompass::imuCallback, this)},
+    mag_sub_ {node_.subscribe("imu/mag", 1000, &IMUCompass::magCallback, this)},
+    decl_sub_ {node_.subscribe("imu/declination", 1000, &IMUCompass::declCallback, this)},
+
+    // publishers
+    imu_pub_ {node_.advertise<sensor_msgs::Imu>("imu/data_compass", 1)},
+    mag_pub_ {node_.advertise<geometry_msgs::Vector3Stamped>("imu/mag_calib", 1)},
+    compass_pub_ {node_.advertise<std_msgs::Float32>("imu/compass_heading", 1)},
+    raw_compass_pub_ {node_.advertise<std_msgs::Float32>("imu/raw_compass_heading", 1)},
+
+    debug_timer_ {node_.createTimer(ros::Duration(1), &IMUCompass::debugCallback, this)},
+
+    curr_imu_reading_ {new sensor_msgs::Imu()},
+
+    first_mag_reading_ {false},
+    first_gyro_reading_ {false},
+    filter_initialized_ {false},
+    gyro_update_complete_ {false},
+
+    last_motion_update_time_ {ros::Time::now().toSec()}
+{
   // Acquire Parameters
   private_node_.param("mag_bias/x", mag_zero_x_, 0.0);
   private_node_.param("mag_bias/y", mag_zero_y_, 0.0);
   private_node_.param("mag_bias/z", mag_zero_z_, 0.0);
-  ROS_INFO("Using magnetometer bias (x,y):%f,%f", mag_zero_x_, mag_zero_y_);
+  ROS_INFO("Using magnetometer bias (x, y): %f, %f", mag_zero_x_, mag_zero_y_);
 
   private_node_.param<std::string>("base_frame", base_frame_, "base_link");
+
   private_node_.param("compass/sensor_timeout", sensor_timeout_, 0.5);
+
   private_node_.param("compass/yaw_meas_variance", yaw_meas_variance_, 10.0);
-  private_node_.param("compass/gyro_meas_variance", heading_prediction_variance_, 0.01);
   ROS_INFO("Using variance %f", yaw_meas_variance_);
+
+  private_node_.param("compass/gyro_meas_variance", heading_prediction_variance_, 0.01);
 
   private_node_.param("compass/mag_declination", mag_declination_, 0.0);
   ROS_INFO("Using magnetic declination %f (%f degrees)", mag_declination_, mag_declination_ * 180 / M_PI);
 
-  // Setup Subscribers
-  imu_sub_ = node_.subscribe("imu/data", 1000, &IMUCompass::imuCallback, this);
-  mag_sub_ = node_.subscribe("imu/mag", 1000, &IMUCompass::magCallback, this);
-  decl_sub_ = node_.subscribe("imu/declination", 1000, &IMUCompass::declCallback, this);
-  imu_pub_ = node_.advertise<sensor_msgs::Imu>("imu/data_compass", 1);
-  compass_pub_ = node_.advertise<std_msgs::Float32>("imu/compass_heading", 1);
-  mag_pub_ = node_.advertise<geometry_msgs::Vector3Stamped>("imu/mag_calib", 1);
-
-  raw_compass_pub_ = node_.advertise<std_msgs::Float32>("imu/raw_compass_heading", 1);
-
-  first_mag_reading_ = false;
-  first_gyro_reading_ = false;
-  gyro_update_complete_ = false;
-  last_motion_update_time_ = ros::Time::now().toSec();
-  debug_timer_ = node_.createTimer(ros::Duration(1), &IMUCompass::debugCallback, this);
-
   ROS_INFO("Compass Estimator Started");
 }
 
-void IMUCompass::debugCallback(const ros::TimerEvent&) {
+void IMUCompass::debugCallback(const ros::TimerEvent&)
+{
   if (!first_gyro_reading_)
+  {
     ROS_WARN("Waiting for IMU data, no gyroscope data available)");
-  if (!first_mag_reading_)
-    ROS_WARN("Waiting for mag data, no magnetometer data available, Filter not initialized");
+  }
 
-  if ((ros::Time::now().toSec() - last_motion_update_time_ > sensor_timeout_) && first_gyro_reading_) {
+  if (!first_mag_reading_)
+  {
+    ROS_WARN("Waiting for mag data, no magnetometer data available, Filter not initialized");
+  }
+
+  if ((ros::Time::now().toSec() - last_motion_update_time_ > sensor_timeout_) && first_gyro_reading_)
+  {
     // gyro data is coming in too slowly
     ROS_WARN("Gyroscope data being receieved too slow or not at all");
     first_gyro_reading_ = false;
   }
 
-  if ((ros::Time::now().toSec() - last_measurement_update_time_ > sensor_timeout_) && first_mag_reading_) {
+  if ((ros::Time::now().toSec() - last_measurement_update_time_ > sensor_timeout_) && first_mag_reading_)
+  {
     // gyro data is coming in too slowly
     ROS_WARN("Magnetometer data being receieved too slow or not at all");
     filter_initialized_ = false;
@@ -85,65 +104,27 @@ void IMUCompass::debugCallback(const ros::TimerEvent&) {
   }
 }
 
-void IMUCompass::imuCallback(const sensor_msgs::ImuPtr data) {
-  // Transform Data and get the yaw direction
-  geometry_msgs::Vector3 gyro_vector;
-  geometry_msgs::Vector3 gyro_vector_transformed;
-  gyro_vector = data->angular_velocity;
-
-  if(!first_gyro_reading_)
-    first_gyro_reading_ = true;
-
-  double dt = ros::Time::now().toSec() - last_motion_update_time_;
-  last_motion_update_time_ = ros::Time::now().toSec();
-  tf::StampedTransform transform;
-
-  try {
-    listener_.lookupTransform(base_frame_, data->header.frame_id, ros::Time(0), transform);
-  } catch (tf::TransformException &ex) {
-    ROS_WARN("Missed transform between %s and %s", base_frame_.c_str(), data->header.frame_id.c_str());
-    return;
-  }
-
-  tf::Vector3 orig_bt;
-  tf::Matrix3x3 transform_mat(transform.getRotation());
-  tf::vector3MsgToTF(gyro_vector, orig_bt);
-  tf::vector3TFToMsg(orig_bt * transform_mat, gyro_vector_transformed);
-  double yaw_gyro_reading =  gyro_vector_transformed.z;
-
-  // Run Motion Update
-  if (filter_initialized_) {
-    heading_prediction_ = curr_heading_ + yaw_gyro_reading * dt;  // xp = A*x + B*u
-    heading_variance_prediction_ = curr_heading_variance_ + heading_prediction_variance_; // Sp = A*S*A' + R
-
-    if (heading_prediction_ > M_PI)
-      heading_prediction_ -= 2 * M_PI;
-    else if(heading_prediction_ < -M_PI)
-      heading_prediction_ += 2 * M_PI;
-    gyro_update_complete_ = true;
-  }
-  curr_imu_reading_ = data;
-}
-
-void IMUCompass::declCallback(const std_msgs::Float32& data) {
-  mag_declination_ = data.data;
-  ROS_INFO("Using magnetic declination %f (%f degrees)", mag_declination_, mag_declination_ * 180 / M_PI);
-}
-
-void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
+void IMUCompass::imuCallback(const sensor_msgs::Imu::Ptr& data)
 {
-  geometry_msgs::Vector3 imu_mag = data->magnetic_field;
-  geometry_msgs::Vector3 imu_mag_transformed;
+  std::cerr << "imu callback" << std::endl;
 
-  if (   std::isnan(data->magnetic_field.x)
-      || std::isnan(data->magnetic_field.y)
-      || std::isnan(data->magnetic_field.z))
+  std::cerr << "  angular_velocity" << std::endl;
+  std::cerr << "    x = " << data->angular_velocity.x << std::endl;
+  std::cerr << "    y = " << data->angular_velocity.y << std::endl;
+  std::cerr << "    z = " << data->angular_velocity.z << std::endl;
+  std::cerr << "  orientation" << std::endl;
+  std::cerr << "    x = " << data->orientation.x << std::endl;
+  std::cerr << "    y = " << data->orientation.y << std::endl;
+  std::cerr << "    z = " << data->orientation.z << std::endl;
+  std::cerr << "    w = " << data->orientation.w << std::endl;
+
+  if (!first_gyro_reading_)
   {
-    ROS_WARN_THROTTLE(1, "Magnetic field data is NaN.");
-    return;
+    first_gyro_reading_ = true;
   }
 
-  last_measurement_update_time_ = ros::Time::now().toSec();
+  const auto dt {ros::Time::now().toSec() - last_motion_update_time_};
+  last_motion_update_time_ = ros::Time::now().toSec();
 
   tf::StampedTransform transform;
 
@@ -157,86 +138,200 @@ void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
     return;
   }
 
-  tf::Vector3 orig_bt;
-  tf::Matrix3x3 transform_mat(transform.getRotation());
-  tf::vector3MsgToTF(imu_mag, orig_bt);
-  tf::vector3TFToMsg(orig_bt * transform_mat, imu_mag_transformed);
+  tf::Vector3 orig_bt {};
+  tf::vector3MsgToTF(data->angular_velocity, orig_bt);
 
-  // Compensate for hard iron
-  double mag_x = imu_mag_transformed.x - mag_zero_x_;
-  double mag_y = imu_mag_transformed.y - mag_zero_y_;
-  double mag_z = imu_mag_transformed.z;  // calibration is purely 2D
+  geometry_msgs::Vector3 gyro_vector_transformed {};
+  tf::vector3TFToMsg(orig_bt * tf::Matrix3x3 {transform.getRotation()}, gyro_vector_transformed);
+
+  double yaw_gyro_reading {gyro_vector_transformed.z};
+
+  // Run Motion Update
+  if (filter_initialized_)
+  {
+    heading_prediction_ = curr_heading_ + yaw_gyro_reading * dt;  // xp = A*x + B*u
+    heading_variance_prediction_ = curr_heading_variance_ + heading_prediction_variance_; // Sp = A*S*A' + R
+
+    if (heading_prediction_ > M_PI)
+    {
+      heading_prediction_ -= 2 * M_PI;
+    }
+    else if(heading_prediction_ < -M_PI)
+    {
+      heading_prediction_ += 2 * M_PI;
+    }
+
+    gyro_update_complete_ = true;
+  }
+
+  curr_imu_reading_ = data;
+}
+
+void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
+{
+  std::cerr << "magnetic callback" << std::endl;
+
+  std::cerr << "  received sensor_msgs::MagneticField" << std::endl;
+  std::cerr << "    magnetic_field.x = " << data->magnetic_field.x << std::endl;
+  std::cerr << "    magnetic_field.y = " << data->magnetic_field.y << std::endl;
+  std::cerr << "    magnetic_field.z = " << data->magnetic_field.z << std::endl;
+
+  if (std::isnan(data->magnetic_field.x) || std::isnan(data->magnetic_field.y) || std::isnan(data->magnetic_field.z))
+  {
+    ROS_WARN_THROTTLE(1, "Magnetic field data is NaN.");
+    return;
+  }
+
+  std::cerr << "  last mesurement update time " << last_measurement_update_time_;
+  last_measurement_update_time_ = ros::Time::now().toSec();
+  std::cerr << " -> " << last_measurement_update_time_ << std::endl;
+
+  tf::StampedTransform transform;
+
+  try
+  {
+    std::cerr << "  lookup transform \"" << base_frame_ << "\" -> \"" << data->header.frame_id << "\"" << std::endl;
+    listener_.lookupTransform(base_frame_, data->header.frame_id, ros::Time(0), transform);
+  }
+  catch (const tf::TransformException& ex)
+  {
+    ROS_WARN("Missed transform between %s and %s", base_frame_.c_str(), data->header.frame_id.c_str());
+    return;
+  }
+
+  tf::Vector3 orig_bt {};
+  tf::vector3MsgToTF(data->magnetic_field, orig_bt);
+
+  geometry_msgs::Vector3 imu_mag_transformed {};
+  tf::vector3TFToMsg(
+    orig_bt * tf::Matrix3x3 {transform.getRotation()},
+    imu_mag_transformed
+  );
 
   // Normalize vector
-  tf::Vector3 calib_mag(mag_x, mag_y, mag_z);
-  calib_mag = calib_mag / magn(calib_mag);
-  mag_x = calib_mag.x();
-  mag_y = calib_mag.y();
-  mag_z = calib_mag.z();
+  tf::Vector3 calib_mag {
+    imu_mag_transformed.x - mag_zero_x_,
+    imu_mag_transformed.y - mag_zero_y_,
+    imu_mag_transformed.z // calibration is purely 2D
+  };
 
-  geometry_msgs::Vector3Stamped calibrated_mag;
-  calibrated_mag.header.stamp = ros::Time::now();
-  calibrated_mag.header.frame_id = "imu_link";
+  calib_mag /= magn(calib_mag);
+  std::cerr << "  calibrated and normalized magnetic field" << std::endl;
+  std::cerr << "    x = " << calib_mag.x() << std::endl;;
+  std::cerr << "    y = " << calib_mag.y() << std::endl;;
+  std::cerr << "    z = " << calib_mag.z() << std::endl;;
 
-  calibrated_mag.vector.x = calib_mag.x();
-  calibrated_mag.vector.y = calib_mag.y();
-  calibrated_mag.vector.z = calib_mag.z();
+  geometry_msgs::Vector3Stamped calibrated_mag {};
+  {
+    calibrated_mag.header.stamp = ros::Time::now();
+    calibrated_mag.header.frame_id = "imu_link";
+
+    calibrated_mag.vector.x = calib_mag.x();
+    calibrated_mag.vector.y = calib_mag.y();
+    calibrated_mag.vector.z = calib_mag.z();
+  }
 
   mag_pub_.publish(calibrated_mag);
 
-  tf::Quaternion q;
-  tf::quaternionMsgToTF(curr_imu_reading_->orientation, q);
-  tf::Transform curr_imu_meas;
-  curr_imu_meas = tf::Transform(q, tf::Vector3(0, 0, 0));
-  curr_imu_meas = curr_imu_meas * transform;
-  tf::Quaternion orig (transform.getRotation());
+  // tf::Quaternion q {};
+  // tf::quaternionMsgToTF(curr_imu_reading_->orientation, q);
+  // std::cerr << "  current reading imu" << std::endl;
+  // std::cerr << "    x = " << curr_imu_reading_->orientation.x << std::endl;
+  // std::cerr << "    y = " << curr_imu_reading_->orientation.y << std::endl;
+  // std::cerr << "    z = " << curr_imu_reading_->orientation.z << std::endl;
+  // std::cerr << "    w = " << curr_imu_reading_->orientation.w << std::endl;
 
-  // Till Compensation
-  tf::Matrix3x3 temp(curr_imu_meas.getRotation());
+  // tf::Transform curr_imu_meas {tf::Transform(q, tf::Vector3 {0, 0, 0}) * transform};
+  //
+  // double roll, pitch, yaw;
+  // tf::Matrix3x3 {curr_imu_meas.getRotation()}.getRPY(roll, pitch, yaw);
+  // std::cerr << "  roll = " << roll << std::endl;
+  // std::cerr << "  pitch = " << pitch << std::endl;
+  // std::cerr << "  yaw = " << yaw << std::endl;
 
-  double c_r, c_p, c_y;
-  temp.getRPY(c_r, c_p, c_y);
-  double cos_pitch = cos(c_p);
-  double sin_pitch = sin(c_p);
-  double cos_roll = cos(c_r);
-  double sin_roll = sin(c_r);
-  double t_mag_x = mag_x * cos_pitch + mag_z * sin_pitch;
-  double t_mag_y = mag_x * sin_roll * sin_pitch + mag_y * cos_roll - mag_z * sin_roll * cos_pitch;
-  double head_x = t_mag_x;
-  double head_y = t_mag_y;
+  const auto roll {std::atan2(
+    curr_imu_reading_->linear_acceleration.y,
+    curr_imu_reading_->linear_acceleration.z
+  )};
+  std::cerr << "  roll = " << roll << std::endl;
+
+  const auto pitch {std::atan2(
+      curr_imu_reading_->linear_acceleration.x * -1.0,
+      curr_imu_reading_->linear_acceleration.y * std::sin(roll)
+    + curr_imu_reading_->linear_acceleration.z * std::cos(roll)
+  )};
+  std::cerr << "  pitch = " << pitch << std::endl;
+
+  const auto head_x {
+    //   calib_mag.x() * std::cos(pitch)
+    // + calib_mag.z() * std::sin(pitch)
+      calib_mag.z() * std::sin(roll)
+    - calib_mag.y() * std::cos(roll)
+  };
+  std::cerr << "  head_x = " << head_x << std::endl;
+
+  const auto head_y {
+    //   calib_mag.x() * std::sin(roll) * std::sin(pitch)
+    // + calib_mag.y() * std::cos(roll)
+    // - calib_mag.z() * std::sin(roll) * std::cos(pitch)
+      calib_mag.x() * std::cos(pitch)
+    + calib_mag.y() * std::sin(pitch) * std::sin(roll)
+    + calib_mag.z() * std::sin(pitch) * std::cos(roll)
+  };
+  std::cerr << "  head_y = " << head_y << std::endl;
 
   // Retrieve magnetometer heading
-  double heading_meas = atan2(head_x, head_y);
+  double heading_meas = std::atan2(head_x, head_y);
+  std::cerr << "  heading = " << heading_meas << std::endl;
 
   // If this is the first magnetometer reading, initialize filter
-  if (!first_mag_reading_) {
+  if (!first_mag_reading_)
+  {
     // Initialize filter
     initFilter(heading_meas);
     first_mag_reading_ = true;
     return;
   }
+
   // If gyro update (motion update) is complete, run measurement update and publish imu data
-  if (gyro_update_complete_) {
+  if (gyro_update_complete_)
+  {
     // K = Sp*C'*inv(C*Sp*C' + Q)
     double kalman_gain = heading_variance_prediction_ * (1 / (heading_variance_prediction_ + yaw_meas_variance_));
     double innovation = heading_meas - heading_prediction_;
-    if (abs(innovation) > M_PI)  // large change, signifies a wraparound. kalman filters don't like discontinuities like wraparounds, handle seperately.
+
+    if (M_PI < std::abs(innovation)) // large change, signifies a wraparound. kalman filters don't like discontinuities like wraparounds, handle seperately.
+    {
       curr_heading_ = heading_meas;
+    }
     else
+    {
       curr_heading_ = heading_prediction_ + kalman_gain * (innovation); // mu = mup + K*(y-C*mup)
+    }
 
     curr_heading_variance_ = (1 - kalman_gain) * heading_variance_prediction_; // S = (1-K*C)*Sp
 
-    std_msgs::Float32 raw_heading_float;
+    std_msgs::Float32 raw_heading_float {};
     raw_heading_float.data = heading_meas;
     raw_compass_pub_.publish(raw_heading_float);
 
     repackageImuPublish(transform);
+
     gyro_update_complete_ = false;
   }
 }
 
-void IMUCompass::repackageImuPublish(tf::StampedTransform transform) {
+void IMUCompass::declCallback(const std_msgs::Float32& data)
+{
+  std::cerr << "declination callback" << std::endl;
+
+  std::cerr << "  received std_msgs::Float32" << std::endl;
+  std::cerr << "    data = " << data.data << std::endl;
+  mag_declination_ = data.data;
+}
+
+void IMUCompass::repackageImuPublish(tf::StampedTransform transform)
+{
   // Get Current IMU reading and Compass heading
   tf::Quaternion imu_reading;
   tf::quaternionMsgToTF(curr_imu_reading_->orientation, imu_reading);
@@ -268,17 +363,22 @@ void IMUCompass::repackageImuPublish(tf::StampedTransform transform) {
   imu_pub_.publish(curr_imu_reading_);
 }
 
-void IMUCompass::initFilter(double heading_meas) {
+void IMUCompass::initFilter(double heading_meas)
+{
   curr_heading_ = heading_meas;
   curr_heading_variance_ = 1; // not very sure
   filter_initialized_ = true;
   ROS_INFO("Magnetometer data received. Compass estimator initialized");
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv)
+{
   ros::init(argc, argv, "imu_compass");
-  ros::NodeHandle node, private_node("~");
-  IMUCompass imu_heading_estimator(node, private_node);
+
+  ros::NodeHandle node, private_node {"~"};
+  IMUCompass imu_heading_estimator {node, private_node};
+
   ros::spin();
+
   return 0;
 }
