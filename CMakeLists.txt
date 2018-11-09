@@ -1,7 +1,8 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.5.1)
 project(imu_compass)
 
 find_package(catkin REQUIRED COMPONENTS geometry_msgs sensor_msgs std_msgs tf)
+set(CMAKE_CXX_STANDARD 14)
 
 catkin_package()
 
