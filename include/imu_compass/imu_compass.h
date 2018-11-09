@@ -84,6 +84,5 @@ class IMUCompass
   double yaw_meas_variance_;
 
 public:
-  IMUCompass(ros::NodeHandle &n);
-  IMUCompass(ros::NodeHandle &n, ros::NodeHandle &pn);
+  IMUCompass(ros::NodeHandle& n, ros::NodeHandle& pn);
 };

@@ -24,8 +24,9 @@ CPP file for IMU Compass Class that combines gyroscope and magnetometer data to 
 
 #include "imu_compass/imu_compass.h"
 
-double magn(tf::Vector3 a) {
-      return sqrt(a.x()*a.x() + a.y()*a.y() + a.z()*a.z());
+auto magn(const tf::Vector3& a)
+{
+  return std::sqrt(a.x() * a.x() + a.y() * a.y() + a.z() * a.z());
 }
 
 IMUCompass::IMUCompass(ros::NodeHandle &n, ros::NodeHandle &pn) :
