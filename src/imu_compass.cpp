@@ -161,29 +161,37 @@ void IMUCompass::imuCallback(const sensor_msgs::Imu::Ptr& data)
 
 void IMUCompass::declCallback(const std_msgs::Float32& data)
 {
+  std::cerr << "declination callback" << std::endl;
+
+  std::cerr << "  received std_msgs::Float32" << std::endl;
+  std::cerr << "    data = " << data.data << std::endl;
   mag_declination_ = data.data;
-  ROS_INFO("Using magnetic declination %f (%f degrees)", mag_declination_, mag_declination_ * 180 / M_PI);
 }
 
 void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
 {
-  geometry_msgs::Vector3 imu_mag = data->magnetic_field;
-  geometry_msgs::Vector3 imu_mag_transformed;
+  std::cerr << "magnetic callback" << std::endl;
 
-  if (   std::isnan(data->magnetic_field.x)
-      || std::isnan(data->magnetic_field.y)
-      || std::isnan(data->magnetic_field.z))
+  std::cerr << "  received sensor_msgs::MagneticField" << std::endl;
+  std::cerr << "    magnetic_field.x = " << data->magnetic_field.x << std::endl;
+  std::cerr << "    magnetic_field.y = " << data->magnetic_field.y << std::endl;
+  std::cerr << "    magnetic_field.z = " << data->magnetic_field.z << std::endl;
+
+  if (std::isnan(data->magnetic_field.x) || std::isnan(data->magnetic_field.y) || std::isnan(data->magnetic_field.z))
   {
     ROS_WARN_THROTTLE(1, "Magnetic field data is NaN.");
     return;
   }
 
+  std::cerr << "  last mesurement update time " << last_measurement_update_time_;
   last_measurement_update_time_ = ros::Time::now().toSec();
+  std::cerr << " -> " << last_measurement_update_time_ << std::endl;
 
   tf::StampedTransform transform;
 
   try
   {
+    std::cerr << "  lookup transform \"" << base_frame_ << "\" -> \"" << data->header.frame_id << "\"" << std::endl;
     listener_.lookupTransform(base_frame_, data->header.frame_id, ros::Time(0), transform);
   }
   catch (const tf::TransformException& ex)
@@ -192,10 +200,11 @@ void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
     return;
   }
 
-  tf::Vector3 orig_bt;
-  tf::Matrix3x3 transform_mat(transform.getRotation());
-  tf::vector3MsgToTF(imu_mag, orig_bt);
-  tf::vector3TFToMsg(orig_bt * transform_mat, imu_mag_transformed);
+  tf::Vector3 orig_bt {};
+  tf::vector3MsgToTF(data->magnetic_field, orig_bt);
+
+  geometry_msgs::Vector3 imu_mag_transformed {};
+  tf::vector3TFToMsg(orig_bt * tf::Matrix3x3 {transform.getRotation()}, imu_mag_transformed);
 
   // Normalize vector
   tf::Vector3 calib_mag {
@@ -205,10 +214,10 @@ void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
   };
 
   calib_mag /= magn(calib_mag);
-
-  const auto mag_x {calib_mag.x()};
-  const auto mag_y {calib_mag.y()};
-  const auto mag_z {calib_mag.z()};
+  std::cerr << "  calibrated and normalized magnetic field" << std::endl;
+  std::cerr << "    x = " << calib_mag.x() << std::endl;;
+  std::cerr << "    y = " << calib_mag.y() << std::endl;;
+  std::cerr << "    z = " << calib_mag.z() << std::endl;;
 
   geometry_msgs::Vector3Stamped calibrated_mag {};
   {
@@ -226,25 +235,27 @@ void IMUCompass::magCallback(const sensor_msgs::MagneticField::ConstPtr& data)
   tf::quaternionMsgToTF(curr_imu_reading_->orientation, q);
 
   tf::Transform curr_imu_meas;
-  curr_imu_meas = tf::Transform(q, tf::Vector3(0, 0, 0));
-  curr_imu_meas = curr_imu_meas * transform;
-  tf::Quaternion orig (transform.getRotation());
+  curr_imu_meas = tf::Transform(q, tf::Vector3 {0, 0, 0}) * transform;
 
-  double c_r, c_p, c_y;
-  tf::Matrix3x3 {curr_imu_meas.getRotation()}.getRPY(c_r, c_p, c_y);
+  double roll, pitch, yaw;
+  tf::Matrix3x3 {curr_imu_meas.getRotation()}.getRPY(roll, pitch, yaw);
 
-  double cos_pitch = std::cos(c_p);
-  double sin_pitch = std::sin(c_p);
-  double cos_roll = std::cos(c_r);
-  double sin_roll = std::sin(c_r);
+  const auto head_x {
+      calib_mag.x() * std::cos(pitch)
+    + calib_mag.z() * std::sin(pitch)
+  };
+  std::cerr << "  head_x = " << head_x << std::endl;
 
-  double t_mag_x = mag_x * cos_pitch + mag_z * sin_pitch;
-  double t_mag_y = mag_x * sin_roll * sin_pitch + mag_y * cos_roll - mag_z * sin_roll * cos_pitch;
-  double head_x = t_mag_x;
-  double head_y = t_mag_y;
+  const auto head_y {
+      calib_mag.x() * std::sin(roll) * std::sin(pitch)
+    + calib_mag.y() * std::cos(roll)
+    - calib_mag.z() * std::sin(roll) * std::cos(pitch)
+  };
+  std::cerr << "  head_y = " << head_y << std::endl;
 
   // Retrieve magnetometer heading
   double heading_meas = std::atan2(head_x, head_y);
+  std::cerr << "  heading = " << heading_meas << std::endl;
 
   // If this is the first magnetometer reading, initialize filter
   if (!first_mag_reading_)
