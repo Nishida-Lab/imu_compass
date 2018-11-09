@@ -25,16 +25,17 @@ Header file for IMU Compass Class that combines gyroscope and magnetometer data 
 #include "tf/tf.h"
 #include "tf/transform_listener.h"
 
-#include "sensor_msgs/Imu.h"
-#include "geometry_msgs/Vector3Stamped.h"
-#include "std_msgs/Float32.h"
+#include <geometry_msgs/Vector3Stamped.h>
+#include <sensor_msgs/Imu.h>
+#include <sensor_msgs/MagneticField.h>
+#include <std_msgs/Float32.h>
 
 //typedef boost::shared_ptr<sensor_msgs::Imu const> ImuConstPtr;
 
-class IMUCompass {
-
-private:
+class IMUCompass
+{
   ros::NodeHandle node_;
+  ros::NodeHandle private_node_;
   ros::Subscriber imu_sub_;
   ros::Subscriber mag_sub_;
   ros::Subscriber decl_sub_;
@@ -48,7 +49,7 @@ private:
 
   void imuCallback(sensor_msgs::ImuPtr data);
   void declCallback(const std_msgs::Float32& data);
-  void magCallback(const geometry_msgs::Vector3StampedConstPtr& data);
+  void magCallback(const sensor_msgs::MagneticField::ConstPtr& data);
   void debugCallback(const ros::TimerEvent&);
   void repackageImuPublish(tf::StampedTransform);
 
@@ -58,6 +59,8 @@ private:
   bool first_gyro_reading_; //signifies receiving the first gyroscope message
   bool filter_initialized_; //after receiving the first measurement, make sure the filter is initialized
   bool gyro_update_complete_; //sigfnifies that a gyro update (motion model update) has gone through
+
+  std::string base_frame_;
 
   double mag_zero_x_, mag_zero_y_, mag_zero_z_;
 
@@ -82,7 +85,5 @@ private:
 
 public:
   IMUCompass(ros::NodeHandle &n);
-  ~IMUCompass() {
-  }
+  IMUCompass(ros::NodeHandle &n, ros::NodeHandle &pn);
 };
-
